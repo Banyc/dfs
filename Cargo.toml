@@ -1,0 +1,8 @@
+[package]
+name = "dfs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+primitive = { git = "https://github.com/Banyc/primitive.git", tag = "v0.0.54" }
+serde = { version = "1", features = ["derive", "rc"] }
