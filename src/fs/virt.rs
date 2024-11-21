@@ -1,6 +1,93 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use primitive::map::hash_map::HashEnsure;
 use serde::{Deserialize, Serialize};
+
+use super::block::BlockId;
+
+#[derive(Debug, Clone)]
+pub struct OpenFileTable {
+    map: HashMap<PathSplit, OpenFileAttribute>,
+}
+impl OpenFileTable {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+    pub fn open(
+        &mut self,
+        path: PathSplit,
+        write: bool,
+        now: Instant,
+    ) -> Result<(), OpenExclusionError> {
+        if self
+            .map
+            .get(&path)
+            .is_some_and(|attr| attr.write() || write)
+        {
+            return Err(OpenExclusionError { path });
+        }
+        let _ = self
+            .map
+            .ensure(&path, || OpenFileAttribute::new(write, now));
+        Ok(())
+    }
+    pub fn lease(&mut self, path: &PathSplit, now: Instant) {
+        let Some(attr) = self.map.get_mut(path) else {
+            return;
+        };
+        attr.lease(now);
+    }
+    pub fn clear_timeout(&mut self, ttl: Duration, now: Instant) {
+        let mut timed_out = vec![];
+        for (path, attr) in &self.map {
+            if attr.is_timeout(ttl, now) {
+                timed_out.push(path.clone());
+            }
+        }
+        for path in timed_out {
+            self.map.remove(&path);
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenExclusionError {
+    pub path: PathSplit,
+}
+impl Default for OpenFileTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenFileAttribute {
+    write: bool,
+    last_lease: Instant,
+}
+impl OpenFileAttribute {
+    pub fn new(write: bool, now: Instant) -> Self {
+        Self {
+            write,
+            last_lease: now,
+        }
+    }
+    pub fn write(&self) -> bool {
+        self.write
+    }
+    pub fn lease(&mut self, now: Instant) {
+        self.last_lease = now;
+    }
+    pub fn is_timeout(&self, ttl: Duration, now: Instant) -> bool {
+        let unrefreshed_for = now.duration_since(self.last_lease);
+        ttl < unrefreshed_for
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsNode {
@@ -138,24 +225,7 @@ pub struct FileAttribute {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileBlock {
     off_range: (u64, u64),
-    replication: Vec<PhysBlockLocation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhysBlockLocation {
-    host_name: Arc<str>,
-    path: Arc<str>,
-}
-impl PhysBlockLocation {
-    pub fn new(host_name: Arc<str>, path: Arc<str>) -> Self {
-        Self { host_name, path }
-    }
-    pub fn host_name(&self) -> &Arc<str> {
-        &self.host_name
-    }
-    pub fn path(&self) -> &Arc<str> {
-        &self.path
-    }
+    id: BlockId,
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +257,7 @@ impl PathCursor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PathSplit {
     segs: Arc<[Arc<str>]>,
 }
