@@ -1,11 +1,15 @@
 use std::{
     collections::HashMap,
+    io::{self, Write},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use primitive::map::hash_map::HashEnsure;
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+use tokio::task::spawn_blocking;
 
 use super::block::BlockId;
 
@@ -283,4 +287,23 @@ pub struct PathNotExist {
 #[derive(Debug, Clone)]
 pub struct PathNotDirectory {
     pub path: PathCursor,
+}
+
+pub async fn atomic_persist(path: impl AsRef<Path>, buf: &[u8]) -> io::Result<()> {
+    let path = path.as_ref().to_path_buf();
+    let buf = unsafe { Arc::from_raw(buf) };
+    spawn_blocking({
+        let buf = buf.clone();
+        move || -> io::Result<()> {
+            let mut file = NamedTempFile::new()?;
+            file.write_all(&buf)?;
+            file.flush()?;
+            file.as_file().sync_all()?;
+            file.persist(path)?;
+            Ok(())
+        }
+    })
+    .await??;
+    drop(buf);
+    Ok(())
 }
