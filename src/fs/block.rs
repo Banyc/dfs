@@ -2,8 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
+use crate::store::StoreId;
+
 pub type BlockId = Arc<str>;
-pub type StoreId = Arc<str>;
 
 #[derive(Debug, Clone)]
 pub struct ReplicatedBlocksMap {
