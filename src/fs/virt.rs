@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use primitive::map::hash_map::HashEnsure;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::task::spawn_blocking;
@@ -37,16 +36,28 @@ impl OpenFileTable {
         {
             return Err(OpenExclusionError { path });
         }
-        let _ = self
-            .map
-            .ensure(&path, || OpenFileAttribute::new(write, now));
+        let Some(attr) = self.map.get_mut(&path) else {
+            self.map.insert(path, OpenFileAttribute::new(write, now));
+            return Ok(());
+        };
+        attr.read();
         Ok(())
     }
-    pub fn lease(&mut self, path: &PathSplit, now: Instant) {
+    pub fn lease(&mut self, path: &PathSplit, now: Instant) -> Result<(), LeaseNotFoundError> {
+        let Some(attr) = self.map.get_mut(path) else {
+            return Err(LeaseNotFoundError);
+        };
+        attr.lease(now);
+        Ok(())
+    }
+    pub fn close(&mut self, path: &PathSplit) {
         let Some(attr) = self.map.get_mut(path) else {
             return;
         };
-        attr.lease(now);
+        attr.close();
+        if attr.is_free() {
+            self.map.remove(path).unwrap();
+        }
     }
     pub fn clear_timeout(&mut self, ttl: Duration, now: Instant) {
         let mut timed_out = vec![];
@@ -64,6 +75,8 @@ impl OpenFileTable {
 pub struct OpenExclusionError {
     pub path: PathSplit,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseNotFoundError;
 impl Default for OpenFileTable {
     fn default() -> Self {
         Self::new()
@@ -74,19 +87,33 @@ impl Default for OpenFileTable {
 pub struct OpenFileAttribute {
     write: bool,
     last_lease: Instant,
+    holders: usize,
 }
 impl OpenFileAttribute {
     pub fn new(write: bool, now: Instant) -> Self {
         Self {
             write,
             last_lease: now,
+            holders: 1,
         }
+    }
+    pub fn read(&mut self) {
+        if self.write {
+            return;
+        }
+        self.holders += 1;
     }
     pub fn write(&self) -> bool {
         self.write
     }
     pub fn lease(&mut self, now: Instant) {
         self.last_lease = now;
+    }
+    pub fn close(&mut self) {
+        self.holders = self.holders.saturating_sub(1);
+    }
+    pub fn is_free(&self) -> bool {
+        self.holders == 0
     }
     pub fn is_timeout(&self, ttl: Duration, now: Instant) -> bool {
         let unrefreshed_for = now.duration_since(self.last_lease);
@@ -105,6 +132,9 @@ impl FsNode {
     }
     pub fn body(&self) -> &FsNodeBody {
         &self.body
+    }
+    pub fn body_mut(&mut self) -> &mut FsNodeBody {
+        &mut self.body
     }
     pub fn list(
         &self,
@@ -125,11 +155,11 @@ impl FsNode {
         match &self.body {
             FsNodeBody::Directory(directory) => {
                 let Some(node) = directory.nodes().get(path.curr()) else {
-                    return Err(FsNodeQueryError::PathNotExist(PathNotExist { path }));
+                    return Err(FsNodeQueryError::FileNotExist(FileNotExist { path }));
                 };
                 node.list(path.next(), visit)
             }
-            FsNodeBody::File(_) => Err(FsNodeQueryError::PathNotDirectory(PathNotDirectory {
+            FsNodeBody::File(_) => Err(FsNodeQueryError::DirectoryNotExist(DirectoryNotExist {
                 path,
             })),
         }
@@ -141,11 +171,11 @@ impl FsNode {
         match &self.body {
             FsNodeBody::Directory(directory) => {
                 let Some(node) = directory.nodes().get(path.curr()) else {
-                    return Err(FsNodeQueryError::PathNotExist(PathNotExist { path }));
+                    return Err(FsNodeQueryError::FileNotExist(FileNotExist { path }));
                 };
                 node.get(path.next())
             }
-            FsNodeBody::File(_) => Err(FsNodeQueryError::PathNotDirectory(PathNotDirectory {
+            FsNodeBody::File(_) => Err(FsNodeQueryError::DirectoryNotExist(DirectoryNotExist {
                 path,
             })),
         }
@@ -157,25 +187,75 @@ impl FsNode {
         match &mut self.body {
             FsNodeBody::Directory(directory) => {
                 let Some(node) = directory.nodes_mut().get_mut(path.curr()) else {
-                    return Err(FsNodeQueryError::PathNotExist(PathNotExist { path }));
+                    return Err(FsNodeQueryError::FileNotExist(FileNotExist { path }));
                 };
                 node.get_mut(path.next())
             }
-            FsNodeBody::File(_) => Err(FsNodeQueryError::PathNotDirectory(PathNotDirectory {
+            FsNodeBody::File(_) => Err(FsNodeQueryError::DirectoryNotExist(DirectoryNotExist {
                 path,
             })),
+        }
+    }
+    pub fn create_node(
+        &mut self,
+        path: PathCursor,
+        new_node: impl FnOnce() -> FsNode,
+    ) -> Result<(), FsNodeCreateFileError> {
+        let directory = match &mut self.body {
+            FsNodeBody::Directory(directory) => directory,
+            FsNodeBody::File(_) => {
+                return Err(FsNodeCreateFileError::DirectoryNotExist(
+                    DirectoryNotExist { path },
+                ))
+            }
+        };
+        let child = path.next();
+        match child {
+            Some(child) => {
+                let Some(node) = directory.nodes_mut().get_mut(path.curr()) else {
+                    return Err(FsNodeCreateFileError::DirectoryNotExist(
+                        DirectoryNotExist { path },
+                    ));
+                };
+                node.create_node(child, new_node)
+            }
+            None => {
+                let file_name = path.curr();
+                if directory.nodes_mut().get(file_name).is_some() {
+                    return Err(FsNodeCreateFileError::FileExist(FileExist { path }));
+                }
+                directory
+                    .nodes_mut()
+                    .insert(path.curr().clone(), new_node());
+                Ok(())
+            }
         }
     }
 }
 #[derive(Debug, Clone)]
 pub enum FsNodeQueryError {
-    PathNotExist(PathNotExist),
-    PathNotDirectory(PathNotDirectory),
+    FileNotExist(FileNotExist),
+    DirectoryNotExist(DirectoryNotExist),
+}
+#[derive(Debug, Clone)]
+pub enum FsNodeCreateFileError {
+    FileExist(FileExist),
+    DirectoryNotExist(DirectoryNotExist),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsNodeAttribute {
-    name: Arc<str>,
+    // name: Arc<str>,
+}
+impl FsNodeAttribute {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+impl Default for FsNodeAttribute {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +303,20 @@ pub struct File {
     attr: FileAttribute,
     blocks: Vec<FileBlock>,
 }
+impl File {
+    pub fn new(attr: FileAttribute) -> Self {
+        Self {
+            attr,
+            blocks: vec![],
+        }
+    }
+    pub fn attr(&self) -> &FileAttribute {
+        &self.attr
+    }
+    pub fn blocks_mut(&mut self) -> &mut Vec<FileBlock> {
+        &mut self.blocks
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileAttribute {
@@ -244,6 +338,17 @@ impl FileAttribute {
 pub struct FileBlock {
     off_range: (u64, u64),
     id: BlockId,
+}
+impl FileBlock {
+    pub fn new(off_range: (u64, u64), id: BlockId) -> Self {
+        Self { off_range, id }
+    }
+    pub fn off_range(&self) -> (u64, u64) {
+        self.off_range
+    }
+    pub fn id(&self) -> &BlockId {
+        &self.id
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -295,11 +400,15 @@ impl PathSplit {
 }
 
 #[derive(Debug, Clone)]
-pub struct PathNotExist {
+pub struct FileExist {
     pub path: PathCursor,
 }
 #[derive(Debug, Clone)]
-pub struct PathNotDirectory {
+pub struct FileNotExist {
+    pub path: PathCursor,
+}
+#[derive(Debug, Clone)]
+pub struct DirectoryNotExist {
     pub path: PathCursor,
 }
 

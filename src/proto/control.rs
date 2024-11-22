@@ -3,12 +3,11 @@ use serde::{Deserialize, Serialize};
 use crate::fs::block::{BlockId, BlockReport};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ControlProto {
+pub enum ControlReq {
     OpenReq(OpenReq),
-    OpenResp(OpenResp),
     OpenLeaseReq(OpenLeaseReq),
     CloseReq(CloseReq),
-    AddBlockReq(AddBlockReq),
+    AllocBlockReq(AllocBlockReq),
     BlockReportReq(BlockReportReq),
 }
 
@@ -44,17 +43,17 @@ pub struct DeleteDirectory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddBlockReq {
+pub struct AllocBlockReq {
     pub path: String,
     pub off_range: (u64, u64),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AddBlockResp {
-    Ok(AddBlockRespOk),
+pub enum AllocBlockResp {
+    Ok(AllocBlockRespOk),
     Rejected,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddBlockRespOk {
+pub struct AllocBlockRespOk {
     pub block: BlockId,
     pub store_addr: String,
 }
