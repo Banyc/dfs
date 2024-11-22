@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::StoreId;
 
+use super::virt::PathSplit;
+
 pub type BlockId = Arc<str>;
 
 #[derive(Debug, Clone)]
@@ -51,12 +53,14 @@ impl Default for ReplicatedBlocksMap {
 pub struct ReplicatedBlock {
     body: BlockBody,
     stores: Vec<StoreId>,
+    virt_path: PathSplit,
 }
 impl ReplicatedBlock {
-    pub fn new(body: BlockBody) -> Self {
+    pub fn new(body: BlockBody, virt_path: PathSplit) -> Self {
         Self {
             body,
             stores: vec![],
+            virt_path,
         }
     }
     pub fn body(&self) -> &BlockBody {
@@ -64,6 +68,9 @@ impl ReplicatedBlock {
     }
     pub fn stores(&self) -> &[StoreId] {
         &self.stores
+    }
+    pub fn virt_path(&self) -> &PathSplit {
+        &self.virt_path
     }
     pub fn push(&mut self, store: StoreId, body: &BlockBody) -> Result<(), CorruptedBlockError> {
         if self.body != *body {

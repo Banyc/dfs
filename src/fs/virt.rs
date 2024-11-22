@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
+    num::NonZeroUsize,
     path::Path,
     sync::Arc,
     time::{Duration, Instant},
@@ -224,7 +225,20 @@ pub struct File {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileAttribute {}
+pub struct FileAttribute {
+    replication: NonZeroUsize,
+}
+impl FileAttribute {
+    pub fn new(replication: NonZeroUsize) -> Self {
+        Self { replication }
+    }
+    pub fn replication(&self) -> NonZeroUsize {
+        self.replication
+    }
+    pub fn set_replication(&mut self, replication: NonZeroUsize) {
+        self.replication = replication;
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileBlock {
